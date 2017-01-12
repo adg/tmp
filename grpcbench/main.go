@@ -6,6 +6,7 @@ import (
 	"crypto/tls"
 	"flag"
 	"fmt"
+	"io"
 	"io/ioutil"
 	"log"
 	"net"
@@ -20,13 +21,14 @@ import (
 )
 
 var (
-	numRuns  = flag.Int("n", 2, "number of calls to make")
-	latency  = flag.Duration("latency", 4*time.Millisecond, "artificial latency to introduce (symmetric)")
-	msgSize  = flag.Int("size", 1<<20, "message size")
-	addr     = flag.String("addr", "localhost:8080", "listen address")
-	useGRPC  = flag.Bool("grpc", true, "use GRPC (fall back is plain HTTP)")
-	useHTTP2 = flag.Bool("http2", true, "use HTTP2")
-	verbose  = flag.Bool("v", false, "verbose output")
+	numRuns    = flag.Int("n", 2, "number of calls to make")
+	latency    = flag.Duration("latency", 4*time.Millisecond, "artificial latency to introduce (symmetric)")
+	msgSize    = flag.Int("size", 1<<20, "message size")
+	addr       = flag.String("addr", "localhost:8080", "listen address")
+	useGRPC    = flag.Bool("grpc", true, "use GRPC (fall back is plain HTTP)")
+	useHTTP2   = flag.Bool("http2", true, "use HTTP2")
+	verbose    = flag.Bool("v", false, "verbose output")
+	windowSize = flag.Int("window", 64<<10, "HTTP2 initial window size")
 )
 
 const (
@@ -89,6 +91,7 @@ func main() {
 				proto = "HTTP"
 				if resp != nil {
 					proto = resp.Proto
+					io.Copy(ioutil.Discard, resp.Body)
 					resp.Body.Close()
 				}
 			}
@@ -121,15 +124,19 @@ func main() {
 	} else {
 		var config tls.Config
 		var err error
-		if *useHTTP2 {
-			config.NextProtos = []string{"h2"}
-		}
 		config.Certificates = make([]tls.Certificate, 1)
 		config.Certificates[0], err = tls.LoadX509KeyPair(certFile, keyFile)
 		if err != nil {
 			log.Fatal(err)
 		}
 		srv := &http.Server{Addr: *addr, TLSConfig: &config, Handler: http.HandlerFunc(validate)}
+		if *useHTTP2 {
+			if err := http2.ConfigureServer(srv, &http2.Server{
+				InitialWindowSize: int32(*windowSize),
+			}); err != nil {
+				log.Fatal(err)
+			}
+		}
 		tlsListener := tls.NewListener(l, &config)
 		log.Fatal(srv.Serve(tlsListener))
 	}
@@ -144,6 +151,7 @@ func validate(w http.ResponseWriter, r *http.Request) {
 	if len(b) != *msgSize {
 		log.Fatalf("validate: got %d bytes, want %d", len(b), *msgSize)
 	}
+	w.Write(b)
 }
 
 type greeter struct {
